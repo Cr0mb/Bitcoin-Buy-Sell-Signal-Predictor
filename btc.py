@@ -5,10 +5,11 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import logging
+import json
 from datetime import datetime, timezone
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from dash import Dash, dcc, html
 from dash.dependencies import Input, Output
 
@@ -16,21 +17,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 app = Dash(__name__)
 
-app.layout = html.Div(
-    style={"backgroundColor": "#111", "height": "100vh", "display": "flex", "justifyContent": "center", "alignItems": "center"},
-    children=[
-        dcc.Graph(
-            id='live-graph',
-            style={"width": "100vw", "height": "100vh"},
-            config={"displayModeBar": False}
-        ),
-        dcc.Interval(id='interval-component', interval=60 * 1000, n_intervals=0)
-    ]
-)
-
+# Global variables
 prices_history, dates_history = [], []
 buy_signals, sell_signals = [], []
 model = None
+data_file = "buy_sell_data.json"
 
 def fetch_bitcoin_data():
     url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1'
@@ -50,6 +41,37 @@ def fetch_bitcoin_data():
     logging.error("Max retries exceeded. Could not fetch data.")
     return [], []
 
+def save_data_to_json():
+    """Save buy/sell signals and prices to a JSON file"""
+    data = {
+        "prices_history": prices_history,
+        "dates_history": [str(date) for date in dates_history],
+        "buy_signals": buy_signals,
+        "sell_signals": sell_signals
+    }
+    try:
+        with open(data_file, 'w') as f:
+            json.dump(data, f)
+        logging.info(f"Data saved to {data_file}")
+    except Exception as e:
+        logging.error(f"Error saving data: {e}")
+
+def load_data_from_json():
+    """Load buy/sell signals and prices from a JSON file"""
+    global prices_history, dates_history, buy_signals, sell_signals
+    try:
+        with open(data_file, 'r') as f:
+            data = json.load(f)
+            prices_history = data.get("prices_history", [])
+            dates_history = [datetime.fromisoformat(date) for date in data.get("dates_history", [])]
+            buy_signals = data.get("buy_signals", [])
+            sell_signals = data.get("sell_signals", [])
+        logging.info(f"Data loaded from {data_file}")
+    except FileNotFoundError:
+        logging.warning(f"{data_file} not found. Starting with empty data.")
+    except Exception as e:
+        logging.error(f"Error loading data: {e}")
+
 def calculate_rsi(prices, window=14):
     df = pd.DataFrame({'price': prices})
     delta = df['price'].diff()
@@ -62,11 +84,28 @@ def calculate_rsi(prices, window=14):
 def calculate_sma(prices, window=14):
     return pd.Series(prices).rolling(window).mean().dropna().values
 
+def calculate_macd(prices, short_window=12, long_window=26, signal_window=9):
+    short_ema = pd.Series(prices).ewm(span=short_window, min_periods=1, adjust=False).mean()
+    long_ema = pd.Series(prices).ewm(span=long_window, min_periods=1, adjust=False).mean()
+    macd = short_ema - long_ema
+    signal = macd.ewm(span=signal_window, min_periods=1, adjust=False).mean()
+    return macd, signal
+
+def calculate_bollinger_bands(prices, window=20):
+    sma = calculate_sma(prices, window)
+    rolling_std = pd.Series(prices).rolling(window).std()
+    upper_band = sma + (rolling_std * 2)
+    lower_band = sma - (rolling_std * 2)
+    return upper_band, lower_band
+
 def generate_features(prices):
     rsi_values = calculate_rsi(prices)
     sma_values = calculate_sma(prices)
-    min_length = min(len(rsi_values), len(sma_values), len(prices) - 15)
-    features = np.column_stack((rsi_values[:min_length], sma_values[:min_length]))
+    macd, signal = calculate_macd(prices)
+    upper_band, lower_band = calculate_bollinger_bands(prices)
+
+    min_length = min(len(rsi_values), len(sma_values), len(macd), len(prices) - 15)
+    features = np.column_stack((rsi_values[:min_length], sma_values[:min_length], macd[:min_length], signal[:min_length], upper_band[:min_length], lower_band[:min_length]))
     labels = (np.array(prices[15:15 + min_length]) > np.array(prices[15 - 1:15 - 1 + min_length])).astype(int)
     return features, labels
 
@@ -76,10 +115,22 @@ def train_model(prices):
         logging.warning("Not enough data to train model.")
         return None
     X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42)
+    model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
     model.fit(X_train, y_train)
-    accuracy = accuracy_score(y_test, model.predict(X_test))
+
+    cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='accuracy')
+    logging.info(f"Model Accuracy (CV): {cv_scores.mean() * 100:.2f}%")
+
+    y_pred = model.predict(X_test)
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
     logging.info(f"Model Accuracy: {accuracy * 100:.2f}%")
+    logging.info(f"Precision: {precision * 100:.2f}%")
+    logging.info(f"Recall: {recall * 100:.2f}%")
+    logging.info(f"F1 Score: {f1 * 100:.2f}%")
+
     return model
 
 def predict_price_movement(model, prices):
@@ -88,11 +139,13 @@ def predict_price_movement(model, prices):
 
 def update_data():
     global prices_history, dates_history, buy_signals, sell_signals, model
+    retry_delay = 60
     while True:
         dates, prices = fetch_bitcoin_data()
         if not dates or not prices:
             logging.warning("No data available. Retrying...")
-            time.sleep(60)
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 3600)
             continue
 
         prices_history = (prices_history + prices)[-200:]
@@ -109,6 +162,7 @@ def update_data():
                 else:
                     sell_signals.append(len(prices_history) - 1)
 
+        save_data_to_json()  # Save data after every update
         time.sleep(60)
 
 threading.Thread(target=update_data, daemon=True).start()
@@ -137,7 +191,7 @@ def update_graph(_):
 
     fig.add_annotation(
         x=dates_history[-1], y=max(prices_history),
-        text="Legend:\n🟢 Green = Buy\n🔴 Red = Sell",
+        text="",
         showarrow=False,
         font=dict(size=14, color="white"),
         align="left",
@@ -161,4 +215,5 @@ def update_graph(_):
     return fig
 
 if __name__ == '__main__':
+    load_data_from_json()  # Load data when starting
     app.run_server(debug=True, use_reloader=False)
