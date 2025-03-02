@@ -10,9 +10,7 @@ from datetime import datetime, timezone, timedelta
 import pytz
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from dash import Dash, dcc, html
-from dash import dash_table
+from dash import Dash, dcc, html, dash_table
 from dash.dependencies import Input, Output
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -23,7 +21,6 @@ data_file = "buy_sell_data.json"
 prices_history, dates_history = [], []
 buy_signals, sell_signals = [], []
 model = None
-
 central_tz = pytz.timezone('US/Central')
 
 def fetch_bitcoin_data():
@@ -35,18 +32,13 @@ def fetch_bitcoin_data():
             data = response.json()
             prices = [entry[1] for entry in data['prices']]
             timestamps = [entry[0] for entry in data['prices']]
-
-            dates = []
-            for ts in timestamps:
-                utc_time = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-                central_time = utc_time.astimezone(central_tz)
-                dates.append(central_time)
+            
+            dates = [datetime.fromtimestamp(ts / 1000, tz=timezone.utc).astimezone(central_tz) for ts in timestamps]
             return dates, prices
         except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching data: {e}")
             time.sleep(2 ** attempt)
     return [], []
-
 
 def save_data_to_json():
     data = {
@@ -93,8 +85,8 @@ def predict_price_movement(model, prices):
 
 def update_data():
     global prices_history, dates_history, buy_signals, sell_signals, model
-    last_buy_signal_time = None
-    last_sell_signal_time = None
+    
+    load_data_from_json()
     
     while True:
         dates, prices = fetch_bitcoin_data()
@@ -102,8 +94,8 @@ def update_data():
             time.sleep(120)
             continue
 
-        prices_history = (prices_history + prices)[-200:]
-        dates_history = (dates_history + dates)[-200:]
+        prices_history += prices
+        dates_history += dates
 
         if len(prices_history) > 50 and (model is None or len(prices_history) % 10 == 0):
             model = train_model(prices_history)
@@ -112,15 +104,9 @@ def update_data():
             prediction = predict_price_movement(model, prices_history)
 
             if prediction == 1:
-                if last_buy_signal_time is None or (dates_history[-1] - last_buy_signal_time) >= timedelta(minutes=3):
-                    buy_signals.append(dates_history[-1])
-                    last_buy_signal_time = dates_history[-1]
-                    print(f"Buy signal at {dates_history[-1]} with price {prices_history[-1]}")  # Print buy signal
+                buy_signals.append(dates_history[-1])
             elif prediction == 0:
-                if last_sell_signal_time is None or (dates_history[-1] - last_sell_signal_time) >= timedelta(minutes=3):
-                    sell_signals.append(dates_history[-1])
-                    last_sell_signal_time = dates_history[-1]
-                    print(f"Sell signal at {dates_history[-1]} with price {prices_history[-1]}")  # Print sell signal
+                sell_signals.append(dates_history[-1])
 
         save_data_to_json()
         time.sleep(120)
@@ -128,28 +114,25 @@ def update_data():
 threading.Thread(target=update_data, daemon=True).start()
 
 app.layout = html.Div([
+    dcc.Graph(id='live-graph', style={"width": "70vw", "height": "100vh"}),
     html.Div([
-        dcc.Graph(id='live-graph', style={"width": "70vw", "height": "100vh"}),
-        html.Div([
-            dash_table.DataTable(
-                id='buy-sell-table',
-                columns=[
-                    {"name": "Time", "id": "time"},
-                    {"name": "Price (USD)", "id": "price"},
-                    {"name": "Signal", "id": "signal"}
-                ],
-                data=[],
-                style_table={'height': '100%', 'overflowY': 'auto'},
-                style_cell={'textAlign': 'center'}
-            )
-        ], style={"width": "30vw", "height": "100vh", "overflow": "auto", "display": "inline-block"})
-    ], style={"display": "flex"}),
+        dash_table.DataTable(
+            id='buy-sell-table',
+            columns=[
+                {"name": "Time", "id": "time"},
+                {"name": "Price (USD)", "id": "price"},
+                {"name": "Signal", "id": "signal"}
+            ],
+            data=[],
+            style_table={'height': '100%', 'overflowY': 'auto'},
+            style_cell={'textAlign': 'center'}
+        )
+    ], style={"width": "30vw", "height": "100vh", "overflow": "auto", "display": "inline-block"}),
     dcc.Interval(id='interval-component', interval=60000, n_intervals=0)
 ])
 
 @app.callback(
-    [Output('live-graph', 'figure'),
-     Output('buy-sell-table', 'data')],
+    [Output('live-graph', 'figure'), Output('buy-sell-table', 'data')],
     [Input('interval-component', 'n_intervals')]
 )
 def update_graph_and_table(_):
@@ -159,43 +142,43 @@ def update_graph_and_table(_):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates_history, y=prices_history, mode='lines', name='Bitcoin Price', line=dict(color='blue')))
 
-    fig.add_trace(go.Scatter(
-        x=[date for date in buy_signals if date in dates_history],
-        y=[prices_history[dates_history.index(date)] for date in buy_signals if date in dates_history],
-        mode='markers', name='Buy Signal', marker=dict(symbol='triangle-up', color='green', size=10)
-    ))
+    price_lookup = {date: price for date, price in zip(dates_history, prices_history)}
 
-    fig.add_trace(go.Scatter(
-        x=[date for date in sell_signals if date in dates_history],
-        y=[prices_history[dates_history.index(date)] for date in sell_signals if date in dates_history],
-        mode='markers', name='Sell Signal', marker=dict(symbol='triangle-down', color='red', size=10)
-    ))
+    buy_points = [(date, price_lookup[date]) for date in buy_signals if date in price_lookup]
+    sell_points = [(date, price_lookup[date]) for date in sell_signals if date in price_lookup]
 
-    fig.update_layout(title='Bitcoin Buy/Sell Signals', xaxis_title='Time', yaxis_title='Price (USD)', template='plotly_dark')
 
-    table_data = []
-    signal_times = set()
+    if buy_points:
+        fig.add_trace(go.Scatter(
+            x=[bp[0] for bp in buy_points], 
+            y=[bp[1] for bp in buy_points], 
+            mode='markers',
+            name='Buy', 
+            marker=dict(color='green', size=10),
+            line=dict(width=0)
+        ))
 
-    for signal in buy_signals + sell_signals:
-        if signal.tzinfo is None:
-            signal = central_tz.localize(signal)
+    if sell_points:
+        fig.add_trace(go.Scatter(
+            x=[sp[0] for sp in sell_points], 
+            y=[sp[1] for sp in sell_points], 
+            mode='markers',  
+            name='Sell', 
+            marker=dict(color='red', size=10),
+            line=dict(width=0)
+        ))
 
-        if signal in signal_times:
-            continue
 
-        signal_times.add(signal)
-        closest_idx = min(range(len(dates_history)), key=lambda i: abs(dates_history[i] - signal))
-        table_data.append({
-            "time": dates_history[closest_idx].strftime('%Y-%m-%d %I:%M:%S %p'),
-            "price": prices_history[closest_idx],
-            "signal": "Buy" if signal in buy_signals else "Sell"
-        })
+    table_data = [
+        {"time": date.strftime('%Y-%m-%d %I:%M:%S %p'), "price": price, "signal": "Buy"} 
+        for date, price in buy_points
+    ] + [
+        {"time": date.strftime('%Y-%m-%d %I:%M:%S %p'), "price": price, "signal": "Sell"} 
+        for date, price in sell_points
+    ]
 
     return fig, table_data
 
 
-
 if __name__ == '__main__':
     app.run_server(debug=True, use_reloader=False)
-
-
