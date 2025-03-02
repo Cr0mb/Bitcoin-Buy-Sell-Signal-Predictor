@@ -6,11 +6,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import logging
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import pytz
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from dash import Dash, dcc, html
+from dash import dash_table
 from dash.dependencies import Input, Output
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -22,6 +24,8 @@ prices_history, dates_history = [], []
 buy_signals, sell_signals = [], []
 model = None
 
+central_tz = pytz.timezone('US/Central')
+
 def fetch_bitcoin_data():
     url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1'
     for attempt in range(3):
@@ -31,12 +35,18 @@ def fetch_bitcoin_data():
             data = response.json()
             prices = [entry[1] for entry in data['prices']]
             timestamps = [entry[0] for entry in data['prices']]
-            dates = [datetime.fromtimestamp(ts / 1000, timezone.utc) for ts in timestamps]
+
+            dates = []
+            for ts in timestamps:
+                utc_time = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                central_time = utc_time.astimezone(central_tz)
+                dates.append(central_time)
             return dates, prices
         except requests.exceptions.RequestException as e:
             logging.error(f"Error fetching data: {e}")
             time.sleep(2 ** attempt)
     return [], []
+
 
 def save_data_to_json():
     data = {
@@ -83,10 +93,13 @@ def predict_price_movement(model, prices):
 
 def update_data():
     global prices_history, dates_history, buy_signals, sell_signals, model
+    last_buy_signal_time = None
+    last_sell_signal_time = None
+    
     while True:
         dates, prices = fetch_bitcoin_data()
         if not dates or not prices:
-            time.sleep(60)
+            time.sleep(120)
             continue
 
         prices_history = (prices_history + prices)[-200:]
@@ -97,35 +110,61 @@ def update_data():
 
         if model:
             prediction = predict_price_movement(model, prices_history)
+
             if prediction == 1:
-                buy_signals.append(dates_history[-1])
+                if last_buy_signal_time is None or (dates_history[-1] - last_buy_signal_time) >= timedelta(minutes=3):
+                    buy_signals.append(dates_history[-1])
+                    last_buy_signal_time = dates_history[-1]
+                    print(f"Buy signal at {dates_history[-1]} with price {prices_history[-1]}")  # Print buy signal
             elif prediction == 0:
-                sell_signals.append(dates_history[-1])
+                if last_sell_signal_time is None or (dates_history[-1] - last_sell_signal_time) >= timedelta(minutes=3):
+                    sell_signals.append(dates_history[-1])
+                    last_sell_signal_time = dates_history[-1]
+                    print(f"Sell signal at {dates_history[-1]} with price {prices_history[-1]}")  # Print sell signal
 
         save_data_to_json()
-        time.sleep(60)
+        time.sleep(120)
 
 threading.Thread(target=update_data, daemon=True).start()
 
 app.layout = html.Div([
-    dcc.Graph(id='live-graph', style={"width": "100vw", "height": "100vh"}),
+    html.Div([
+        dcc.Graph(id='live-graph', style={"width": "70vw", "height": "100vh"}),
+        html.Div([
+            dash_table.DataTable(
+                id='buy-sell-table',
+                columns=[
+                    {"name": "Time", "id": "time"},
+                    {"name": "Price (USD)", "id": "price"},
+                    {"name": "Signal", "id": "signal"}
+                ],
+                data=[],
+                style_table={'height': '100%', 'overflowY': 'auto'},
+                style_cell={'textAlign': 'center'}
+            )
+        ], style={"width": "30vw", "height": "100vh", "overflow": "auto", "display": "inline-block"})
+    ], style={"display": "flex"}),
     dcc.Interval(id='interval-component', interval=60000, n_intervals=0)
 ])
 
-@app.callback(Output('live-graph', 'figure'), [Input('interval-component', 'n_intervals')])
-def update_graph(_):
+@app.callback(
+    [Output('live-graph', 'figure'),
+     Output('buy-sell-table', 'data')],
+    [Input('interval-component', 'n_intervals')]
+)
+def update_graph_and_table(_):
     if not dates_history or not prices_history:
-        return go.Figure()
+        return go.Figure(), []
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates_history, y=prices_history, mode='lines', name='Bitcoin Price', line=dict(color='blue')))
-    
+
     fig.add_trace(go.Scatter(
         x=[date for date in buy_signals if date in dates_history],
         y=[prices_history[dates_history.index(date)] for date in buy_signals if date in dates_history],
         mode='markers', name='Buy Signal', marker=dict(symbol='triangle-up', color='green', size=10)
     ))
-    
+
     fig.add_trace(go.Scatter(
         x=[date for date in sell_signals if date in dates_history],
         y=[prices_history[dates_history.index(date)] for date in sell_signals if date in dates_history],
@@ -133,7 +172,30 @@ def update_graph(_):
     ))
 
     fig.update_layout(title='Bitcoin Buy/Sell Signals', xaxis_title='Time', yaxis_title='Price (USD)', template='plotly_dark')
-    return fig
+
+    table_data = []
+    signal_times = set()
+
+    for signal in buy_signals + sell_signals:
+        if signal.tzinfo is None:
+            signal = central_tz.localize(signal)
+
+        if signal in signal_times:
+            continue
+
+        signal_times.add(signal)
+        closest_idx = min(range(len(dates_history)), key=lambda i: abs(dates_history[i] - signal))
+        table_data.append({
+            "time": dates_history[closest_idx].strftime('%Y-%m-%d %I:%M:%S %p'),
+            "price": prices_history[closest_idx],
+            "signal": "Buy" if signal in buy_signals else "Sell"
+        })
+
+    return fig, table_data
+
+
 
 if __name__ == '__main__':
     app.run_server(debug=True, use_reloader=False)
+
+
