@@ -15,7 +15,7 @@ from dash.dependencies import Input, Output
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
-app = Dash(__name__)
+app = Dash(__name__, suppress_callback_exceptions=True)
 
 # Global variables
 prices_history, dates_history = [], []
@@ -82,7 +82,7 @@ def calculate_rsi(prices, window=14):
     return rsi.dropna().values
 
 def calculate_sma(prices, window=14):
-    return pd.Series(prices).rolling(window).mean().dropna().values
+    return pd.Series(prices).rolling(window).mean()  # Return as Series, not ndarray
 
 def calculate_macd(prices, short_window=12, long_window=26, signal_window=9):
     short_ema = pd.Series(prices).ewm(span=short_window, min_periods=1, adjust=False).mean()
@@ -94,8 +94,14 @@ def calculate_macd(prices, short_window=12, long_window=26, signal_window=9):
 def calculate_bollinger_bands(prices, window=20):
     sma = calculate_sma(prices, window)
     rolling_std = pd.Series(prices).rolling(window).std()
+    
+    # Align the rolling_std and sma to the full length of prices by padding the beginning
+    rolling_std = rolling_std.iloc[window-1:].reset_index(drop=True)
+    sma = sma.iloc[window-1:].reset_index(drop=True)
+
     upper_band = sma + (rolling_std * 2)
     lower_band = sma - (rolling_std * 2)
+    
     return upper_band, lower_band
 
 def generate_features(prices):
@@ -104,10 +110,23 @@ def generate_features(prices):
     macd, signal = calculate_macd(prices)
     upper_band, lower_band = calculate_bollinger_bands(prices)
 
-    min_length = min(len(rsi_values), len(sma_values), len(macd), len(prices) - 15)
-    features = np.column_stack((rsi_values[:min_length], sma_values[:min_length], macd[:min_length], signal[:min_length], upper_band[:min_length], lower_band[:min_length]))
+    # Ensure all arrays are of the same length
+    min_length = min(len(rsi_values), len(sma_values), len(macd), len(signal), len(upper_band), len(lower_band), len(prices) - 15)
+
+    # Slice arrays to ensure they have the same length
+    features = np.column_stack((
+        rsi_values[:min_length], 
+        sma_values[:min_length], 
+        macd[:min_length], 
+        signal[:min_length], 
+        upper_band[:min_length], 
+        lower_band[:min_length]
+    ))
+
     labels = (np.array(prices[15:15 + min_length]) > np.array(prices[15 - 1:15 - 1 + min_length])).astype(int)
+    
     return features, labels
+
 
 def train_model(prices):
     features, labels = generate_features(prices)
@@ -167,6 +186,19 @@ def update_data():
 
 threading.Thread(target=update_data, daemon=True).start()
 
+# Add the missing Interval component in layout
+app.layout = html.Div(
+    style={"backgroundColor": "#111", "height": "100vh", "display": "flex", "justifyContent": "center", "alignItems": "center"},
+    children=[
+        dcc.Graph(
+            id='live-graph',
+            style={"width": "100vw", "height": "100vh"},
+            config={"displayModeBar": False}
+        ),
+        dcc.Interval(id='interval-component', interval=60 * 1000, n_intervals=0)  # This triggers the callback every minute
+    ]
+)
+
 @app.callback(Output('live-graph', 'figure'), [Input('interval-component', 'n_intervals')])
 def update_graph(_):
     if not dates_history or not prices_history:
@@ -215,5 +247,4 @@ def update_graph(_):
     return fig
 
 if __name__ == '__main__':
-    load_data_from_json()  # Load data when starting
     app.run_server(debug=True, use_reloader=False)
