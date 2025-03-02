@@ -29,6 +29,7 @@ app.layout = html.Div(
 )
 
 prices_history, dates_history = [], []
+buy_signals, sell_signals = [], []
 model = None
 
 def fetch_bitcoin_data():
@@ -86,7 +87,7 @@ def predict_price_movement(model, prices):
     return model.predict(features[-1].reshape(1, -1))[0] if len(features) > 0 else None
 
 def update_data():
-    global prices_history, dates_history, model
+    global prices_history, dates_history, buy_signals, sell_signals, model
     while True:
         dates, prices = fetch_bitcoin_data()
         if not dates or not prices:
@@ -100,6 +101,14 @@ def update_data():
         if len(prices_history) > 100 and (model is None or len(prices_history) % 50 == 0):
             model = train_model(prices_history)
 
+        if model:
+            prediction = predict_price_movement(model, prices_history)
+            if len(prices_history) > 14:
+                if prediction == 1:
+                    buy_signals.append(len(prices_history) - 1)
+                else:
+                    sell_signals.append(len(prices_history) - 1)
+
         time.sleep(60)
 
 threading.Thread(target=update_data, daemon=True).start()
@@ -108,15 +117,6 @@ threading.Thread(target=update_data, daemon=True).start()
 def update_graph(_):
     if not dates_history or not prices_history:
         return go.Figure()
-
-    buy_signals, sell_signals = [], []
-    if model:
-        prediction = predict_price_movement(model, prices_history)
-        if len(prices_history) > 14:
-            if prediction == 1:
-                buy_signals.append(len(prices_history) - 1)
-            else:
-                sell_signals.append(len(prices_history) - 1)
 
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=dates_history, y=prices_history, mode='lines', name='Bitcoin Price', line=dict(color='blue')))
