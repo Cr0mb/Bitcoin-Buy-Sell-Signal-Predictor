@@ -1,3 +1,6 @@
+![image](https://github.com/user-attachments/assets/ca950628-5ff0-41ed-8a5f-0a8b11ed7f0d)
+
+
 # Bitcoin Buy/Sell Signal Predictor
 
 This project is a **Bitcoin Buy/Sell Signal Predictor** using machine learning and technical analysis. The model uses a **Random Forest Classifier** to predict Bitcoin's price movement based on **RSI** (Relative Strength Index) and **SMA** (Simple Moving Average) indicators. The script fetches live Bitcoin price data from the **CoinGecko API**, trains the model, and visualizes buy/sell signals on an interactive graph using **Dash** and **Plotly**.
