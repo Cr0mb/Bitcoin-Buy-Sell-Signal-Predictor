@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import pytz
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
 from dash import Dash, dcc, html, dash_table
 from dash.dependencies import Input, Output
 
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 app = Dash(__name__, suppress_callback_exceptions=True)
 
 data_file = "buy_sell_data.json"
+metrics_file = "model_metrics.json"
 prices_history, dates_history, buy_signals, sell_signals = [], [], [], []
 model = None
 central_tz = pytz.timezone('US/Central')
@@ -75,7 +77,40 @@ def train_model(prices):
     X_train, X_test, y_train, y_test = train_test_split(np.array(prices[:-1]).reshape(-1, 1), labels, test_size=0.2, random_state=42)
     model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
     model.fit(X_train, y_train)
+    
+    y_pred = model.predict(X_test)
+    
+    accuracy = model.score(X_test, y_test)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    cm = confusion_matrix(y_test, y_pred)
+    
+    logging.info(f"Model trained. Accuracy: {accuracy:.4f}")
+    logging.info(f"Precision: {precision:.4f}")
+    logging.info(f"Recall: {recall:.4f}")
+    logging.info(f"F1-Score: {f1:.4f}")
+    logging.info(f"Confusion Matrix:\n{cm}")
+    
     return model
+
+
+def save_metrics_to_json(accuracy):
+    try:
+        try:
+            with open(metrics_file, 'r') as f:
+                metrics = json.load(f)
+        except FileNotFoundError:
+            metrics = []
+
+        metrics.append({"timestamp": datetime.now().isoformat(), "accuracy": accuracy})
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+        
+        logging.info(f"Model accuracy saved to {metrics_file}.")
+    except Exception as e:
+        logging.error(f"Error saving model metrics: {e}")
 
 
 def predict_price_movement(model, prices):
@@ -147,8 +182,6 @@ def update_graph_and_table(_):
                  [{"time": date.strftime('%Y-%m-%d %I:%M:%S %p'), "price": price, "signal": "Sell"} for date, price in sell_points]
 
     return fig, table_data
-
-
 
 
 if __name__ == '__main__':
