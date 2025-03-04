@@ -1,188 +1,145 @@
-import time
-import threading
-import requests
-import numpy as np
-import pandas as pd
-import plotly.graph_objects as go
-import logging
-import json
-from datetime import datetime, timezone
-import pytz
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-from dash import Dash, dcc, html, dash_table
-from dash.dependencies import Input, Output
+    import dash
+    from dash import dcc, html
+    import plotly.graph_objs as go
+    import pandas as pd
+    import requests
+    import dash_bootstrap_components as dbc
+    from dash.dash_table import DataTable
+    from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
+    import numpy as np
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+    def fetch_bitcoin_data():
+        url = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart'
+        params = {'vs_currency': 'usd', 'days': '1'}
+        response = requests.get(url, params=params)
+        data = response.json()
+        prices = data['prices']
+        return pd.DataFrame(prices, columns=['timestamp', 'price'])
 
-app = Dash(__name__, suppress_callback_exceptions=True)
+    def format_timestamps(data):
+        data['timestamp'] = pd.to_datetime(data['timestamp'], unit='ms')
+        return data
 
-data_file = "buy_sell_data.json"
-metrics_file = "model_metrics.json"
-prices_history, dates_history, buy_signals, sell_signals = [], [], [], []
-model = None
-central_tz = pytz.timezone('US/Central')
-BITCOIN_API_URL = 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1'
-FETCH_INTERVAL = 120
+    app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
 
+    signal_data = pd.DataFrame(columns=['timestamp', 'price', 'signal'])
 
-def fetch_bitcoin_data():
-    for attempt in range(3):
-        try:
-            response = requests.get(BITCOIN_API_URL, timeout=5)
-            response.raise_for_status()
-            data = response.json()
-            return [
-                datetime.fromtimestamp(entry[0] / 1000, tz=timezone.utc).astimezone(central_tz) 
-                for entry in data['prices']
-            ], [entry[1] for entry in data['prices']]
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Error fetching data (attempt {attempt + 1}): {e}")
-            time.sleep(2 ** attempt)
-    return [], []
-
-
-def save_data_to_json():
-    try:
-        with open(data_file, 'w') as f:
-            json.dump({
-                "prices_history": prices_history,
-                "dates_history": [date.isoformat() for date in dates_history],
-                "buy_signals": [date.isoformat() for date in buy_signals],
-                "sell_signals": [date.isoformat() for date in sell_signals]
-            }, f)
-    except Exception as e:
-        logging.error(f"Error saving data: {e}")
-
-
-def load_data_from_json():
-    global prices_history, dates_history, buy_signals, sell_signals
-    try:
-        with open(data_file, 'r') as f:
-            data = json.load(f)
-            prices_history = data.get("prices_history", [])
-            dates_history = [datetime.fromisoformat(date) for date in data.get("dates_history", [])]
-            buy_signals = [datetime.fromisoformat(date) for date in data.get("buy_signals", [])]
-            sell_signals = [datetime.fromisoformat(date) for date in data.get("sell_signals", [])]
-    except (FileNotFoundError, json.JSONDecodeError):
-        logging.warning(f"{data_file} not found or invalid. Starting fresh.")
-
-
-def train_model(prices):
-    if len(prices) < 50:
-        return None
-    labels = np.sign(np.diff(prices)).astype(int)
-    labels[labels == -1] = 0
-    X_train, X_test, y_train, y_test = train_test_split(np.array(prices[:-1]).reshape(-1, 1), labels, test_size=0.2, random_state=42)
-    model = RandomForestClassifier(n_estimators=100, random_state=42, max_depth=5)
-    model.fit(X_train, y_train)
-    
-    y_pred = model.predict(X_test)
-    
-    accuracy = model.score(X_test, y_test)
-    precision = precision_score(y_test, y_pred)
-    recall = recall_score(y_test, y_pred)
-    f1 = f1_score(y_test, y_pred)
-    cm = confusion_matrix(y_test, y_pred)
-    
-    logging.info(f"Model trained. Accuracy: {accuracy:.4f}")
-    logging.info(f"Precision: {precision:.4f}")
-    logging.info(f"Recall: {recall:.4f}")
-    logging.info(f"F1-Score: {f1:.4f}")
-    logging.info(f"Confusion Matrix:\n{cm}")
-    
-    return model
-
-
-def save_metrics_to_json(accuracy):
-    try:
-        try:
-            with open(metrics_file, 'r') as f:
-                metrics = json.load(f)
-        except FileNotFoundError:
-            metrics = []
-
-        metrics.append({"timestamp": datetime.now().isoformat(), "accuracy": accuracy})
-
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=4)
+    app.layout = html.Div([
+        html.H1("Bitcoin Buy/Sell Signal Predictor", style={'textAlign': 'center', 'marginTop': '20px', 'color': 'white'}),
         
-        logging.info(f"Model accuracy saved to {metrics_file}.")
-    except Exception as e:
-        logging.error(f"Error saving model metrics: {e}")
+        dcc.Dropdown(
+            id='day-filter',
+            options=[
+                {'label': 'Last 24 hours', 'value': '24h'},
+                {'label': 'Today', 'value': 'today'}
+            ],
+            value='24h',
+            style={'width': '50%', 'margin': 'auto', 'marginTop': '20px', 'color': 'black', 'backgroundColor': '#f8f9fa'}
+        ),
+        
+        html.Div([
+            html.Div([
+                dcc.Graph(
+                    id='price-graph',
+                    style={'height': '500px', 'width': '100%'},
+                    config={'displayModeBar': True, 'scrollZoom': True, 'responsive': True}
+                )
+            ], style={'width': '70%', 'display': 'inline-block'}),
 
+            html.Div([
+                DataTable(id='signals-table', style_table={'height': '400px', 'overflowY': 'auto'},
+                          style_cell={'textAlign': 'center', 'padding': '5px', 'color': 'white', 'backgroundColor': '#343a40'}),
+            ], style={'width': '30%', 'display': 'inline-block', 'paddingLeft': '20px'})
+        ], style={'display': 'flex', 'justifyContent': 'space-between', 'padding': '20px'}),
 
-def predict_price_movement(model, prices):
-    return model.predict(np.array(prices[-2]).reshape(1, -1))[0] if len(prices) >= 2 else None
+        html.Div(id='model-status', style={'textAlign': 'center', 'marginTop': '20px', 'color': 'white'}),
+        html.Div(id='metrics-display', style={'textAlign': 'center', 'marginTop': '20px', 'color': 'white'}),
+    ])
 
+    @app.callback(
+        [
+            dash.dependencies.Output('price-graph', 'figure'),
+            dash.dependencies.Output('model-status', 'children'),
+            dash.dependencies.Output('signals-table', 'data'),
+            dash.dependencies.Output('metrics-display', 'children')
+        ],
+        [
+            dash.dependencies.Input('day-filter', 'value')
+        ]
+    )
+    def update_graph(day_filter):
+        data = fetch_bitcoin_data()
 
-def update_data():
-    global prices_history, dates_history, buy_signals, sell_signals, model
-    load_data_from_json()
-    while True:
-        dates, prices = fetch_bitcoin_data()
-        if dates and prices:
-            prices_history.extend(prices)
-            dates_history.extend(dates)
+        data = format_timestamps(data)
 
-            if len(prices_history) > 50 and (model is None or len(prices_history) % 10 == 0):
-                model = train_model(prices_history)
+        print("Fetching new data...")
 
-            if model:
-                prediction = predict_price_movement(model, prices_history)
-                if prediction == 1:
-                    buy_signals.append(dates_history[-1])
-                elif prediction == 0:
-                    sell_signals.append(dates_history[-1])
-            save_data_to_json()
-        time.sleep(FETCH_INTERVAL)
+        buy_signal = data['price'] > data['price'].shift(1)
+        sell_signal = data['price'] < data['price'].shift(1)
 
-threading.Thread(target=update_data, daemon=True).start()
+        data['signal'] = np.nan
+        data.loc[buy_signal, 'signal'] = 'Buy'
+        data.loc[sell_signal, 'signal'] = 'Sell'
 
-app.layout = html.Div([
-    dcc.Graph(id='live-graph', style={"width": "70vw", "height": "100vh"}),
-    html.Div([
-        dash_table.DataTable(
-            id='buy-sell-table',
-            columns=[{"name": "Time", "id": "time"}, {"name": "Price (USD)", "id": "price"}, {"name": "Signal", "id": "signal"}],
-            data=[],
-            style_table={'height': '100%', 'overflowY': 'auto'},
-            style_cell={'textAlign': 'center'}
+        actual_signals = data['signal'].shift(-1).fillna('Sell')
+
+        accuracy = accuracy_score(actual_signals[1:], data['signal'][1:])
+        f1 = f1_score(actual_signals[1:], data['signal'][1:], pos_label='Buy')
+        conf_matrix = confusion_matrix(actual_signals[1:], data['signal'][1:], labels=['Buy', 'Sell'])
+
+        print(f"Accuracy: {accuracy:.2f}")
+        print(f"F1-Score: {f1:.2f}")
+        print(f"Confusion Matrix:\n{conf_matrix}")
+
+        trace_price = go.Scatter(
+            x=data['timestamp'],
+            y=data['price'],
+            mode='lines',
+            name='Bitcoin Price',
+            line=dict(color='royalblue', width=2)
         )
-    ], style={"width": "30vw", "height": "100vh", "overflow": "auto", "display": "inline-block"}),
-    dcc.Interval(id='interval-component', interval=60000, n_intervals=0)
-])
 
-@app.callback(
-    [Output('live-graph', 'figure'), Output('buy-sell-table', 'data')],
-    [Input('interval-component', 'n_intervals')]
-)
-def update_graph_and_table(_):
-    if not dates_history or not prices_history:
-        return go.Figure(), []
+        trace_buy = go.Scatter(
+            x=data[buy_signal]['timestamp'],
+            y=data[buy_signal]['price'],
+            mode='markers',
+            marker=dict(symbol='triangle-up', color='lime', size=12),
+            name='Buy Signal'
+        )
 
-    price_lookup = dict(zip(dates_history, prices_history))
-    buy_points = [(date, price_lookup[date]) for date in buy_signals if date in price_lookup]
-    sell_points = [(date, price_lookup[date]) for date in sell_signals if date in price_lookup]
+        trace_sell = go.Scatter(
+            x=data[sell_signal]['timestamp'],
+            y=data[sell_signal]['price'],
+            mode='markers',
+            marker=dict(symbol='triangle-down', color='red', size=12),
+            name='Sell Signal'
+        )
 
-    fig = go.Figure()
+        figure = {
+            'data': [trace_price, trace_buy, trace_sell],
+            'layout': go.Layout(
+                title='Bitcoin Price with Buy/Sell Signals',
+                xaxis=dict(title='Time', showgrid=False),
+                yaxis=dict(title='Price (USD)', showgrid=True, zeroline=False),
+                showlegend=True,
+                plot_bgcolor='rgba(0, 0, 0, 0)',
+                paper_bgcolor='rgba(0, 0, 0, 0)',
+                font=dict(family='Arial', size=14, color='white')
+            )
+        }
 
-    fig.add_trace(go.Scatter(x=dates_history, y=prices_history, mode='lines', name='Bitcoin Price', line=dict(color='blue')))
+        table_data = data[['timestamp', 'price', 'signal']].to_dict('records')
 
-    if buy_points:
-        fig.add_trace(go.Scatter(x=[bp[0] for bp in buy_points], y=[bp[1] for bp in buy_points], 
-                                 mode='markers', name='Buy', marker=dict(color='green', size=10)))
+        metrics_display = (
+            f"Accuracy: {accuracy:.2f}<br>"
+            f"F1-Score: {f1:.2f}<br>"
+            f"Confusion Matrix: <br>"
+            f"[[{conf_matrix[0][0]}, {conf_matrix[0][1]}],<br>"
+            f"[{conf_matrix[1][0]}, {conf_matrix[1][1]}]]"
+        )
 
-    if sell_points:
-        fig.add_trace(go.Scatter(x=[sp[0] for sp in sell_points], y=[sp[1] for sp in sell_points], 
-                                 mode='markers', name='Sell', marker=dict(color='red', size=10)))
-
-    table_data = [{"time": date.strftime('%Y-%m-%d %I:%M:%S %p'), "price": price, "signal": "Buy"} for date, price in buy_points] + \
-                 [{"time": date.strftime('%Y-%m-%d %I:%M:%S %p'), "price": price, "signal": "Sell"} for date, price in sell_points]
-
-    return fig, table_data
+        return figure, "Model is ready!", table_data, metrics_display
 
 
-if __name__ == '__main__':
-    app.run_server(debug=True, use_reloader=False)
+    if __name__ == '__main__':
+        app.run_server(debug=True)
